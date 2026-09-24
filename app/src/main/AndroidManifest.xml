@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- M1 第2步：先不申请媒体权限，仅验证可安装可启动；
-         权限与 MediaStore 闭环在第3步再加。 -->
+    <!-- T004：只读相册浏览闭环所需权限。
+         API 33+ 拆分为图片/视频两个运行时权限，可部分授权；
+         API 29-32 用 READ_EXTERNAL_STORAGE（maxSdkVersion=32）。
+         本任务仅读取，不请求任何写入权限。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"

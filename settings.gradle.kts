@@ -17,5 +17,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "slides-native"
+rootProject.name = "slides"
 include(":app")

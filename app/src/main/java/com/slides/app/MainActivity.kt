@@ -9,21 +9,23 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -44,6 +46,7 @@ import com.slides.app.home.DetailSession
 import com.slides.app.home.HomeScreen
 import com.slides.app.home.HomeViewModel
 import com.slides.app.permissions.Permissions
+import com.slides.app.permissions.Permissions.AccessScope
 import com.slides.app.theme.SlidesAccent
 import com.slides.app.theme.SlidesOnAccent
 import com.slides.app.theme.SlidesTheme
@@ -59,21 +62,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 权限界面状态（P0 说明 / 全拒绝 / 部分 / 就绪）。 */
-private sealed interface PermUi {
-    data object Explaining : PermUi
-    data object None : PermUi
-    data class Partial(val imagesGranted: Boolean, val videosGranted: Boolean) : PermUi
-    data object Ready : PermUi
-}
-
-private fun currentPermUi(context: Context): PermUi {
-    val im = Permissions.imagesGranted(context)
-    val vd = Permissions.videosGranted(context)
+/** 请求结果映射到真实授权范围。 */
+private fun scopeFromGrants(grants: Map<String, Boolean>): AccessScope {
+    if (!Permissions.supportsGranular()) {
+        return if (grants[Permissions.READ_STORAGE] == true) AccessScope.FULL else AccessScope.NONE
+    }
+    val im = grants[Permissions.READ_IMAGES] == true
+    val vd = grants[Permissions.READ_VIDEOS] == true
     return when {
-        im && vd -> PermUi.Ready
-        im || vd -> PermUi.Partial(im, vd)
-        else -> PermUi.None
+        im && vd -> AccessScope.FULL
+        im -> AccessScope.IMAGES_ONLY
+        vd -> AccessScope.VIDEOS_ONLY
+        else -> AccessScope.NONE
     }
 }
 
@@ -82,38 +82,46 @@ private fun SlidesRoot() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("slides_prefs", Context.MODE_PRIVATE) }
     var firstRunShown by remember { mutableStateOf(prefs.getBoolean("first_run_shown", false)) }
-    var permUi by remember { mutableStateOf(currentPermUi(context)) }
+    var scope by remember { mutableStateOf(Permissions.currentScope(context)) }
+    var permKey by remember { mutableIntStateOf(0) }
+    var showExplain by remember { mutableStateOf(false) }
 
-    // 冷启 / 回前台 / 从设置返回：重查权限
+    // 冷启 / 回前台 / 从设置返回：重查权限；范围变化则递增 key 触发重新核对集合。
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                permUi = currentPermUi(context)
+                scope = Permissions.currentScope(context)
+                permKey++
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val launcher = rememberLauncherForActivityResult(
+    val requestLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
-        val grantedImages = grants[Permissions.READ_IMAGES] == true
-        val grantedVideos = grants[Permissions.READ_VIDEOS] == true
-        permUi = if (!Permissions.supportsGranular()) {
-            if (grants[Permissions.READ_STORAGE] == true) PermUi.Ready else PermUi.None
-        } else {
-            when {
-                grantedImages && grantedVideos -> PermUi.Ready
-                grantedImages || grantedVideos -> PermUi.Partial(grantedImages, grantedVideos)
-                else -> PermUi.None
-            }
-        }
+        scope = scopeFromGrants(grants)
+        permKey++
         prefs.edit().putBoolean("first_run_shown", true).apply()
     }
 
-    fun requestPermissions() = launcher.launch(Permissions.requiredPermissions())
+    // SELECTED（所选子集）状态下重新选择照片：photo picker 更新 READ_MEDIA_VISUAL_USER_SELECTED。
+    // 返回的是用户本次选中的 URI；选择后系统更新授权集合，MediaStore 查询自动反映新子集。
+    // 取消（返回空列表）不制造授权成功，也不改变现有授权状态。
+    val pickImagesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        // 只有用户实际选择了媒体才重查授权并刷新；取消/空选择保持现状。
+        if (uris.isNotEmpty()) {
+            scope = Permissions.currentScope(context)
+            permKey++
+        }
+    }
+
+    fun requestFull() = requestLauncher.launch(Permissions.requiredPermissions())
+
     fun openSettings() {
         context.startActivity(
             Intent(
@@ -123,55 +131,80 @@ private fun SlidesRoot() {
         )
     }
 
-    when (val ui = permUi) {
-        PermUi.Explaining ->
-            FirstUseScreen(onContinue = {
-                prefs.edit().putBoolean("first_run_shown", true).apply()
-                firstRunShown = true
-                requestPermissions()
-            })
-
-        PermUi.None ->
-            PermissionDeniedScreen(onRequest = ::requestPermissions, onSettings = ::openSettings)
-
-        is PermUi.Partial ->
-            HomeContainer(partial = true, onReSelect = ::requestPermissions)
-
-        PermUi.Ready ->
-            HomeContainer(partial = false, onReSelect = {})
+    // 首次启动但未授权：进入说明页；已说明且未授权则直接进入拒绝态。
+    if (!firstRunShown && scope == AccessScope.NONE) {
+        LaunchedEffect(Unit) { showExplain = true }
     }
 
-    // 首次启动但未授权：进入说明页；已说明且未授权则直接进入拒绝态
-    if (permUi != PermUi.Explaining && !firstRunShown && permUi is PermUi.None) {
-        LaunchedEffect(Unit) { permUi = PermUi.Explaining }
+    when {
+        showExplain ->
+            FirstUseScreen(onContinue = {
+                firstRunShown = true
+                prefs.edit().putBoolean("first_run_shown", true).apply()
+                showExplain = false
+                requestFull()
+            })
+
+        scope == AccessScope.NONE ->
+            PermissionDeniedScreen(onRequest = ::requestFull, onSettings = ::openSettings)
+
+        else ->
+            HomeContainer(
+                scope = scope,
+                permKey = permKey,
+                onReSelect = { pickImagesLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+                onOpenSettings = ::openSettings,
+            )
     }
 }
 
-/** 首页 + 详情覆盖层：首页常驻以保留滚动锚点（PRD 返回顺序：退出详情→回来源目录）。 */
+/** 首页 + 详情覆盖层：首页常驻保留滚动锚点；授权范围变化时重新核对集合并失效详情。 */
 @Composable
-private fun HomeContainer(partial: Boolean, onReSelect: () -> Unit) {
+private fun HomeContainer(
+    scope: AccessScope,
+    permKey: Int,
+    onReSelect: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     val vm: HomeViewModel = viewModel()
     val state by vm.state.collectAsStateWithLifecycle()
     var detail by remember { mutableStateOf<DetailSession?>(null) }
 
-    LaunchedEffect(Unit) { vm.refresh() }
+    // 授权范围 / 前台恢复变化 → 重新核对可访问集合；范围退化为 NONE 时清掉详情。
+    LaunchedEffect(permKey) {
+        vm.refresh()
+        if (scope == AccessScope.NONE) detail = null
+    }
+
+    // 新集合就绪后核对详情项是否仍可访问：失权/缩减时退出失效详情（不把失权当永久删除）。
+    LaunchedEffect(state.allItems) {
+        val d = detail ?: return@LaunchedEffect
+        if (!state.loading && !state.loadError) {
+            val accessible = state.allItems.any { it.localId == d.items[d.index].localId }
+            if (!accessible) detail = null
+        }
+    }
 
     BackHandler(enabled = detail != null) { detail = null }
 
-    androidx.compose.foundation.layout.Box {
+    Box {
         HomeScreen(
             state = state,
-            partial = partial,
-            onReSelect = onReSelect,
-            onSelectBucket = vm::selectBucket,
+            scope = scope,
+            onSelectDirectory = vm::selectDirectory,
             onSetColumns = vm::setColumns,
             onOpenDetail = { items, idx -> detail = DetailSession(items, idx) },
             onRetry = vm::refresh,
+            onReSelect = onReSelect,
+            onOpenSettings = onOpenSettings,
+            onSelectTab = vm::selectTab,
         )
         detail?.let { d ->
             DetailScreen(
                 items = d.items,
                 startIndex = d.index,
+                favoriteKeys = state.favoriteKeys,
+                onToggleFavorite = vm::toggleFavorite,
                 onBack = { detail = null },
                 modifier = Modifier.fillMaxSize(),
             )

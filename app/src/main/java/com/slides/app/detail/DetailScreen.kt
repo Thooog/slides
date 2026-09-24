@@ -1,12 +1,12 @@
 package com.slides.app.detail
 
 import android.net.Uri
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
@@ -23,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -34,18 +36,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
@@ -56,28 +64,33 @@ import com.slides.app.theme.SlidesOnAccent
 import com.slides.app.theme.SlidesTextSecondary
 import com.slides.app.ui.formatDateMs
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
- * 详情页（P2，只读版本）：图片缩放 / 视频播放、左右切换（按钮替代）、返回。
- * 进入即固定来源有序会话快照（PRD §6.2）；不实现收藏/删除。
+ * 详情页（P2）：图片缩放 / 视频播放、左右切换（手势+按钮替代）、收藏、返回。
+ * 进入即固定来源有序会话快照（PRD §6.2）；不实现删除。
+ * 收藏：顶栏 ⭐ 按钮 + 双击切换；取消收藏保持当前项停留；视频收藏不重建播放器。
  */
 @Composable
 fun DetailScreen(
     items: List<Media>,
     startIndex: Int,
+    favoriteKeys: Set<String>,
+    onToggleFavorite: (Media) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) {
-        androidx.compose.runtime.LaunchedEffect(Unit) { onBack() }
+        LaunchedEffect(Unit) { onBack() }
         return
     }
     var index by rememberSaveable { mutableIntStateOf(startIndex.coerceIn(0, items.lastIndex)) }
     val item = items[index]
+    val isFavorite = item.stableKey in favoriteKeys
 
     BackHandler(enabled = true) { onBack() }
 
-    Box(modifier.background(Color(0xFF131521))) {
+    Box(modifier.background(Color(0xFF131521)).systemBarsPadding()) {
         Column(Modifier.fillMaxSize()) {
             // 顶栏
             Surface(color = Color(0xFF1B1C22)) {
@@ -100,6 +113,14 @@ fun DetailScreen(
                         fontSize = 13.sp,
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
+                    // 收藏按钮（等价双击）
+                    TextButton(onClick = { onToggleFavorite(item) }) {
+                        Text(
+                            if (isFavorite) "★" else "☆",
+                            color = if (isFavorite) Color(0xFFFFB300) else Color.White,
+                            fontSize = 22.sp,
+                        )
+                    }
                 }
             }
 
@@ -107,10 +128,16 @@ fun DetailScreen(
             key(item.localId) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     if (item.isVideo) {
-                        VideoPlayerView(item.uri)
+                        VideoPlayerView(
+                            uri = item.uri,
+                            onDoubleTap = { onToggleFavorite(item) },
+                            onSwipeNext = { if (index < items.lastIndex) index++ },
+                            onSwipePrev = { if (index > 0) index-- },
+                        )
                     } else {
                         ZoomableImageView(
                             uri = item.uri,
+                            onDoubleTap = { onToggleFavorite(item) },
                             onSwipeNext = { if (index < items.lastIndex) index++ },
                             onSwipePrev = { if (index > 0) index-- },
                         )
@@ -158,12 +185,16 @@ fun DetailScreen(
 }
 
 /**
- * 图片查看器：未放大时左右滑动切换，双指缩放；放大时平移优先；
- * 双击放大/还原；加载失败显示可恢复占位（不误报永久删除）。
+ * 图片查看器：
+ * - 未放大时单指左右滑动切换；放大时单指平移优先。
+ * - 双指可直接捏合缩放（不要求先双击）；缩放 1..5 倍，超界钳位。
+ * - 双击提交收藏切换（PRD §6.1 双击保留给收藏语义），不绑定缩放。
+ * - 加载失败显示可恢复占位（不误报永久删除）。
  */
 @Composable
 private fun ZoomableImageView(
     uri: Uri,
+    onDoubleTap: () -> Unit,
     onSwipeNext: () -> Unit,
     onSwipePrev: () -> Unit,
 ) {
@@ -174,8 +205,6 @@ private fun ZoomableImageView(
     var size by remember { mutableStateOf(IntSize.Zero) }
     var failed by remember { mutableStateOf(false) }
     var tryKey by remember { mutableIntStateOf(0) }
-    var dragAcc by remember { mutableFloatStateOf(0f) }
-    val zoomed = scale > 1f
 
     fun clamp() {
         if (scale <= 1f) {
@@ -188,35 +217,77 @@ private fun ZoomableImageView(
         }
     }
 
-    val gestureModifier = if (!zoomed) {
-        Modifier
-            .pointerInput(uri) {
-                detectTapGestures(onDoubleTap = {
-                    scale = 2.5f
-                    clamp()
-                })
-            }
-            .pointerInput(uri) {
-                detectHorizontalDragGestures(
-                    onHorizontalDrag = { change, dragAmount ->
-                        change.consume()
-                        dragAcc += dragAmount
-                    },
-                    onDragEnd = {
-                        if (dragAcc <= -120f) onSwipeNext()      // 左滑 → 下一项
-                        else if (dragAcc >= 120f) onSwipePrev()  // 右滑 → 上一项
-                        dragAcc = 0f
-                    },
-                    onDragCancel = { dragAcc = 0f },
-                )
-            }
-    } else {
-        Modifier.pointerInput(uri) {
-            detectTransformGestures { _, pan, zoom, _ ->
-                scale = (scale * zoom).coerceIn(1f, 5f)
-                offsetX += pan.x
-                offsetY += pan.y
-                clamp()
+    // 单一自研手势：双指捏合缩放/平移 + 未放大单指翻页 + 放大单指平移 + 双击收藏。
+    // 缩放用"相对上次 span 的比值"增量更新，避免固定 initialSpan 导致的倍率累计漂移。
+    // lastTapTime 必须放在 pointerInput 块作用域（awaitEachGesture 之外），
+    // 否则每次抬手结束手势后局部变量被重置，双击永远无法识别。
+    val gestureModifier = Modifier.pointerInput(uri) {
+        var lastTapTime = 0L
+        awaitEachGesture {
+            val down = awaitFirstDown()
+            var dragX = 0f
+            var lastPoint = down.position
+            var previousSpan = 0f
+            var pinchMode = false
+            var moved = false
+            while (true) {
+                val event = awaitPointerEvent()
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.isEmpty()) {
+                    // 抬手
+                    if (!moved && !pinchMode) {
+                        // 轻点：判定单击/双击（用抬手时刻做 300ms 判定窗）
+                        val tapTime = SystemClock.uptimeMillis()
+                        if (lastTapTime != 0L && tapTime - lastTapTime <= 300L) {
+                            // 双击：提交收藏切换
+                            lastTapTime = 0L
+                            onDoubleTap()
+                        } else {
+                            lastTapTime = tapTime
+                        }
+                    } else if (moved && !pinchMode && abs(dragX) >= 120f) {
+                        // 未放大时的单指横向滑动：翻页
+                        if (dragX <= -120f) onSwipeNext() else onSwipePrev()
+                    }
+                    break
+                }
+                if (pressed.size >= 2) {
+                    // 双指捏合缩放 + 双指平移（scale=1 时也能直接开始）
+                    pinchMode = true
+                    moved = true
+                    val a = pressed[0].position
+                    val b = pressed[1].position
+                    val span = hypot(b.x - a.x, b.y - a.y)
+                    val centroid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
+                    if (previousSpan == 0f) {
+                        previousSpan = span
+                    } else if (span > 0f) {
+                        // 相对上次 span 的增量缩放，避免倍率累积漂移
+                        scale = (scale * span / previousSpan).coerceIn(1f, 5f)
+                        offsetX += centroid.x - lastPoint.x
+                        offsetY += centroid.y - lastPoint.y
+                        clamp()
+                    }
+                    lastPoint = centroid
+                    previousSpan = span
+                    event.changes.forEach { it.consume() }
+                } else {
+                    val p = pressed[0]
+                    val delta = p.position - lastPoint
+                    if (scale > 1f || pinchMode) {
+                        // 放大/捏合中：单指平移
+                        offsetX += delta.x
+                        offsetY += delta.y
+                        clamp()
+                        moved = true
+                    } else {
+                        // 未放大：累积横向翻页
+                        dragX += delta.x
+                        if (delta.x != 0f || delta.y != 0f) moved = true
+                    }
+                    lastPoint = p.position
+                    if (moved) p.consume()
+                }
             }
         }
     }
@@ -254,35 +325,125 @@ private fun ZoomableImageView(
     }
 }
 
-/** 视频播放：Media3 ExoPlayer，默认控制器（播放/暂停/进度），离开即释放。 */
+/** 视频播放：Media3 ExoPlayer，默认控制器；错误可恢复，前后台暂停/恢复，离开释放；双击收藏、左右滑动切换媒体。 */
 @Composable
-private fun VideoPlayerView(uri: Uri) {
+private fun VideoPlayerView(
+    uri: Uri,
+    onDoubleTap: () -> Unit,
+    onSwipeNext: () -> Unit,
+    onSwipePrev: () -> Unit,
+) {
     val context = LocalContext.current
-    val player = remember {
-        ExoPlayer.Builder(context).build().apply {
-            repeatMode = ExoPlayer.REPEAT_MODE_OFF
-            playWhenReady = true
-        }
-    }
-    DisposableEffect(uri) {
-        player.setMediaItem(MediaItem.fromUri(uri))
-        player.prepare()
-        onDispose {
-            player.playWhenReady = false
-            player.stop()
-            player.clearMediaItems()
-            player.release()
-        }
-    }
-    AndroidView(
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                useController = true
-                controllerAutoShow = true
-                controllerShowTimeoutMs = 4000
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var error by remember { mutableStateOf(false) }
+    var tryKey by remember { mutableIntStateOf(0) }
+
+    key(tryKey) {
+        val player = remember {
+            ExoPlayer.Builder(context).build().apply {
+                repeatMode = Player.REPEAT_MODE_OFF
+                playWhenReady = true
             }
-        },
-        update = { view -> view.player = player },
-        modifier = Modifier.fillMaxSize(),
-    )
+        }
+        DisposableEffect(uri, lifecycleOwner) {
+            val listener = object : Player.Listener {
+                override fun onPlayerError(e: PlaybackException) {
+                    error = true
+                }
+            }
+            player.addListener(listener)
+            player.setMediaItem(MediaItem.fromUri(uri))
+            player.prepare()
+            player.playWhenReady = true
+
+            val obs = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE -> player.playWhenReady = false
+                    Lifecycle.Event.ON_RESUME ->
+                        if (player.playbackState != Player.STATE_ENDED) player.playWhenReady = true
+                    else -> {}
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(obs)
+
+            onDispose {
+                player.removeListener(listener)
+                lifecycleOwner.lifecycle.removeObserver(obs)
+                player.playWhenReady = false
+                player.release()
+            }
+        }
+
+        Box(Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = true
+                        controllerAutoShow = true
+                        controllerShowTimeoutMs = 4000
+                    }
+                },
+                update = { view -> view.player = player },
+                modifier = Modifier.fillMaxSize(),
+            )
+            // 手势层：双击收藏 + 单指横向滑动切换媒体。
+            // 轻点不消费（仍交 PlayerView 处理播放/暂停与控制器显隐）；横向滑动达到阈值才切换，
+            // 纵向/短位移不消费，避免干扰播放器进度条拖动（进度条位于底部控制器，横向拖动会被
+            // 控制器自身捕获，此处手势只在未命中控制器区域时生效）。
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(uri) {
+                        var lastTapTime = 0L
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            var dragX = 0f
+                            var lastPoint = down.position
+                            var moved = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) {
+                                    // 抬手
+                                    if (!moved) {
+                                        val tapTime = SystemClock.uptimeMillis()
+                                        if (lastTapTime != 0L && tapTime - lastTapTime <= 300L) {
+                                            lastTapTime = 0L
+                                            onDoubleTap()
+                                        } else {
+                                            lastTapTime = tapTime
+                                        }
+                                    } else if (abs(dragX) >= 120f) {
+                                        // 横向滑动切换媒体（左滑下一张，右滑上一张）
+                                        if (dragX <= -120f) onSwipeNext() else onSwipePrev()
+                                    }
+                                    break
+                                }
+                                if (pressed.size == 1) {
+                                    val p = pressed[0]
+                                    val delta = p.position - lastPoint
+                                    dragX += delta.x
+                                    if (delta.x != 0f || delta.y != 0f) moved = true
+                                    lastPoint = p.position
+                                    if (moved) p.consume()
+                                } else {
+                                    // 多指：不处理，交由系统/播放器，避免误判
+                                    lastPoint = pressed.last().position
+                                }
+                            }
+                        }
+                    },
+            )
+            if (error) {
+                Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("无法播放该视频", color = Color.White)
+                        TextButton(onClick = { error = false; tryKey++ }) {
+                            Text("重试", color = SlidesAccent)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

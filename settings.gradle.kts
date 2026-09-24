@@ -12,6 +12,8 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories {
         maven { url = uri("https://maven.aliyun.com/repository/public") }
+        // 阿里云 google 专用镜像：代理 dl.google.com，避免 Room 等 artifact 下载超时
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
         google()
         mavenCentral()
     }

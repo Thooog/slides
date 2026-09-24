@@ -1,0 +1,5 @@
+<resources>
+    <!-- 用平台自带主题，不额外引入 Material Components 依赖；
+         Compose 内部用自己的 MaterialTheme 渲染。 -->
+    <style name="Theme.SLIDES" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

@@ -9,7 +9,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -107,19 +106,6 @@ private fun SlidesRoot() {
         prefs.edit().putBoolean("first_run_shown", true).apply()
     }
 
-    // SELECTED（所选子集）状态下重新选择照片：photo picker 更新 READ_MEDIA_VISUAL_USER_SELECTED。
-    // 返回的是用户本次选中的 URI；选择后系统更新授权集合，MediaStore 查询自动反映新子集。
-    // 取消（返回空列表）不制造授权成功，也不改变现有授权状态。
-    val pickImagesLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris ->
-        // 只有用户实际选择了媒体才重查授权并刷新；取消/空选择保持现状。
-        if (uris.isNotEmpty()) {
-            scope = Permissions.currentScope(context)
-            permKey++
-        }
-    }
-
     fun requestFull() = requestLauncher.launch(Permissions.requiredPermissions())
 
     fun openSettings() {
@@ -152,8 +138,6 @@ private fun SlidesRoot() {
             HomeContainer(
                 scope = scope,
                 permKey = permKey,
-                onReSelect = { pickImagesLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
-                onOpenSettings = ::openSettings,
             )
     }
 }
@@ -163,12 +147,12 @@ private fun SlidesRoot() {
 private fun HomeContainer(
     scope: AccessScope,
     permKey: Int,
-    onReSelect: () -> Unit,
-    onOpenSettings: () -> Unit,
 ) {
     val vm: HomeViewModel = viewModel()
     val state by vm.state.collectAsStateWithLifecycle()
     var detail by remember { mutableStateOf<DetailSession?>(null) }
+    // 详情当前显示下标（随翻页更新）：访问核对以当前项为准，不以进入时下标。
+    var detailIndex by remember { mutableIntStateOf(0) }
 
     // 授权范围 / 前台恢复变化 → 重新核对可访问集合；范围退化为 NONE 时清掉详情。
     LaunchedEffect(permKey) {
@@ -176,11 +160,12 @@ private fun HomeContainer(
         if (scope == AccessScope.NONE) detail = null
     }
 
-    // 新集合就绪后核对详情项是否仍可访问：失权/缩减时退出失效详情（不把失权当永久删除）。
+    // 新集合就绪后核对详情当前项是否仍可访问：失权/缩减时退出失效详情（不把失权当永久删除）。
     LaunchedEffect(state.allItems) {
         val d = detail ?: return@LaunchedEffect
         if (!state.loading && !state.loadError) {
-            val accessible = state.allItems.any { it.localId == d.items[d.index].localId }
+            val current = d.items.getOrNull(detailIndex) ?: return@LaunchedEffect
+            val accessible = state.allItems.any { it.localId == current.localId }
             if (!accessible) detail = null
         }
     }
@@ -190,13 +175,13 @@ private fun HomeContainer(
     Box {
         HomeScreen(
             state = state,
-            scope = scope,
             onSelectDirectory = vm::selectDirectory,
             onSetColumns = vm::setColumns,
-            onOpenDetail = { items, idx -> detail = DetailSession(items, idx) },
+            onOpenDetail = { items, idx ->
+                detail = DetailSession(items, idx)
+                detailIndex = idx
+            },
             onRetry = vm::refresh,
-            onReSelect = onReSelect,
-            onOpenSettings = onOpenSettings,
             onSelectTab = vm::selectTab,
         )
         detail?.let { d ->
@@ -206,6 +191,7 @@ private fun HomeContainer(
                 favoriteKeys = state.favoriteKeys,
                 onToggleFavorite = vm::toggleFavorite,
                 onBack = { detail = null },
+                onIndexChanged = { detailIndex = it },
                 modifier = Modifier.fillMaxSize(),
             )
         }

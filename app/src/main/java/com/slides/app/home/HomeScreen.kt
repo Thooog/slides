@@ -47,7 +47,6 @@ import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
 import coil.request.ImageRequest
 import com.slides.app.data.MediaItem
-import com.slides.app.permissions.Permissions.AccessScope
 import com.slides.app.theme.SlidesAccent
 import com.slides.app.theme.SlidesOnAccent
 import com.slides.app.theme.SlidesTextPrimary
@@ -62,18 +61,14 @@ data class DetailSession(val items: List<MediaItem>, val index: Int)
 /**
  * 首页（P1）：顶栏 + 视图Tab（全部/收藏）+ 目录Tab + 网格。
  * 收藏：网格单击进详情；收藏切换在详情页（按钮 + 双击）；顶部独立收藏入口跨目录聚合。
- * 非完整授权下显示精简权限横幅，提供重选/设置入口（闭合 AC2 部分授权闭环）。
  */
 @Composable
 fun HomeScreen(
     state: HomeUiState,
-    scope: AccessScope,
     onSelectDirectory: (String?) -> Unit,
     onSetColumns: (Int) -> Unit,
     onOpenDetail: (List<MediaItem>, Int) -> Unit,
     onRetry: () -> Unit,
-    onReSelect: () -> Unit,
-    onOpenSettings: () -> Unit,
     onSelectTab: (HomeTab) -> Unit,
 ) {
     val gridState = rememberSaveable(state.tab, state.selectedDirectoryKey, saver = LazyGridState.Saver) {
@@ -81,10 +76,6 @@ fun HomeScreen(
     }
 
     Column(Modifier.fillMaxSize().background(Color.White).systemBarsPadding()) {
-        // 非完整授权横幅：所选子集/单类型时提示并给出重选/设置入口（不恢复大段提示条）。
-        if (scope != AccessScope.FULL) {
-            AccessBanner(scope, onReSelect, onOpenSettings)
-        }
         // 顶栏：深色（不含假按钮；只保留真实可用的列数切换）
         Surface(color = SlidesTopBar) {
             Row(
@@ -169,39 +160,6 @@ private fun EmptyState(hasAllEmpty: Boolean, isFavorites: Boolean = false) {
             },
             color = SlidesTextSecondary,
         )
-    }
-}
-
-/**
- * 非完整授权横幅：所选子集（含空集）/仅图片/仅视频时给出精简提示与重选/设置入口。
- * 不恢复大段提示条，仅保证用户在部分授权下能主动调整授权、不被卡在空态（AC2 部分授权闭环）。
- */
-@Composable
-private fun AccessBanner(
-    scope: AccessScope,
-    onReSelect: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    val text = when (scope) {
-        AccessScope.SELECTED -> "仅可访问你选择的部分照片"
-        AccessScope.IMAGES_ONLY -> "仅可访问照片"
-        AccessScope.VIDEOS_ONLY -> "仅可访问视频"
-        else -> ""
-    }
-    Surface(color = Color(0xFFFFF4E0)) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(text, color = SlidesTextPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            TextButton(onClick = if (scope == AccessScope.SELECTED) onReSelect else onOpenSettings) {
-                Text(
-                    if (scope == AccessScope.SELECTED) "重新选择" else "去设置",
-                    color = SlidesAccent,
-                    fontSize = 13.sp,
-                )
-            }
-        }
     }
 }
 

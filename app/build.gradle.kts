@@ -18,6 +18,8 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+        // 测试 runner（T007 真实 Room instrumented test）
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -40,6 +42,11 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    // Room schema 导出目录（T007：exportSchema=true，用于迁移可追踪与迁移测试）
+    ksp {
+        arg("room.schemaLocation", "$projectDir/schemas")
     }
 }
 
@@ -77,6 +84,13 @@ dependencies {
     implementation("androidx.room:room-runtime:2.8.5")
     implementation("androidx.room:room-ktx:2.8.5")
     ksp("androidx.room:room-compiler:2.8.5")
+
+    // 测试基础设施（T007：真实 Room 故障测试，非纯内存 Mock）
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.room:room-testing:2.8.5")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    androidTestImplementation("androidx.arch.core:core-testing:2.2.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -2,8 +2,10 @@ package com.slides.app.data
 
 import android.content.ContentUris
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 
 /**
@@ -14,6 +16,17 @@ import android.provider.MediaStore
  * - 目录身份使用 卷+相对路径，同名不同卷/路径不合并。
  */
 object MediaRepository {
+
+    /**
+     * 主动触发系统媒体扫描（小米移动目录后 MediaStore 更新异步延迟，应用进程内反复 query
+     * 拿不到新行，只有重启才刷新）。扫描整个外部存储根，让移动/改名后的新文件立刻进
+     * MediaStore。扫描是系统异步的，[onCompleted] 在扫描结束后回调（此时再 query 才能拿到
+     * 新行）。
+     */
+    fun scanExternalStorage(context: Context, onCompleted: () -> Unit) {
+        val root = Environment.getExternalStorageDirectory().absolutePath
+        MediaScannerConnection.scanFile(context, arrayOf(root), null) { _, _ -> onCompleted() }
+    }
 
     fun queryAllAccessible(context: Context): Result<List<MediaItem>> {
         // 单类型隔离：某一类型无权限/查询失败，不阻断另一类型。

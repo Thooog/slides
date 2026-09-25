@@ -31,6 +31,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -78,6 +79,7 @@ fun DetailScreen(
     favoriteKeys: Set<String>,
     onToggleFavorite: (Media) -> Unit,
     onBack: () -> Unit,
+    onIndexChanged: (Int) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) {
@@ -86,7 +88,19 @@ fun DetailScreen(
     }
     var index by rememberSaveable { mutableIntStateOf(startIndex.coerceIn(0, items.lastIndex)) }
     val item = items[index]
-    val isFavorite = item.stableKey in favoriteKeys
+    // 乐观本地收藏覆盖：详情页内点击/双击收藏时立即翻转，避免等待异步 Flow 回传导致
+    // 顶栏收藏按钮不即时同步（问题3）。以本地覆盖为准，外部 favoriteKeys 作为基准。
+    var localFavOverrides by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    val isFavorite = localFavOverrides[item.stableKey] ?: (item.stableKey in favoriteKeys)
+
+    fun toggleFavorite() {
+        val target = !isFavorite
+        localFavOverrides = localFavOverrides + (item.stableKey to target)
+        onToggleFavorite(item)
+    }
+
+    // 当前显示 ID 回传：访问核对/收藏提交以当前项为准，不以进入时下标。
+    LaunchedEffect(index, items) { onIndexChanged(index) }
 
     BackHandler(enabled = true) { onBack() }
 
@@ -114,7 +128,7 @@ fun DetailScreen(
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     // 收藏按钮（等价双击）
-                    TextButton(onClick = { onToggleFavorite(item) }) {
+                    TextButton(onClick = { toggleFavorite() }) {
                         Text(
                             if (isFavorite) "★" else "☆",
                             color = if (isFavorite) Color(0xFFFFB300) else Color.White,
@@ -130,14 +144,14 @@ fun DetailScreen(
                     if (item.isVideo) {
                         VideoPlayerView(
                             uri = item.uri,
-                            onDoubleTap = { onToggleFavorite(item) },
+                            onDoubleTap = { toggleFavorite() },
                             onSwipeNext = { if (index < items.lastIndex) index++ },
                             onSwipePrev = { if (index > 0) index-- },
                         )
                     } else {
                         ZoomableImageView(
                             uri = item.uri,
-                            onDoubleTap = { onToggleFavorite(item) },
+                            onDoubleTap = { toggleFavorite() },
                             onSwipeNext = { if (index < items.lastIndex) index++ },
                             onSwipePrev = { if (index > 0) index-- },
                         )
@@ -206,6 +220,12 @@ private fun ZoomableImageView(
     var failed by remember { mutableStateOf(false) }
     var tryKey by remember { mutableIntStateOf(0) }
 
+    // 回调最新引用：pointerInput 以 uri 为 key，同一图片多次双击不会重启手势块，
+    // 需持有最新 onDoubleTap（否则收藏按钮状态因陈旧闭包不同步）。
+    val currentDoubleTap by rememberUpdatedState(onDoubleTap)
+    val currentNext by rememberUpdatedState(onSwipeNext)
+    val currentPrev by rememberUpdatedState(onSwipePrev)
+
     fun clamp() {
         if (scale <= 1f) {
             scale = 1f; offsetX = 0f; offsetY = 0f
@@ -241,13 +261,13 @@ private fun ZoomableImageView(
                         if (lastTapTime != 0L && tapTime - lastTapTime <= 300L) {
                             // 双击：提交收藏切换
                             lastTapTime = 0L
-                            onDoubleTap()
+                            currentDoubleTap()
                         } else {
                             lastTapTime = tapTime
                         }
                     } else if (moved && !pinchMode && abs(dragX) >= 120f) {
                         // 未放大时的单指横向滑动：翻页
-                        if (dragX <= -120f) onSwipeNext() else onSwipePrev()
+                        if (dragX <= -120f) currentNext() else currentPrev()
                     }
                     break
                 }
@@ -374,76 +394,121 @@ private fun VideoPlayerView(
             }
         }
 
-        Box(Modifier.fillMaxSize()) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = true
-                        controllerAutoShow = true
-                        controllerShowTimeoutMs = 4000
-                    }
-                },
-                update = { view -> view.player = player },
-                modifier = Modifier.fillMaxSize(),
-            )
-            // 手势层：双击收藏 + 单指横向滑动切换媒体。
-            // 轻点不消费（仍交 PlayerView 处理播放/暂停与控制器显隐）；横向滑动达到阈值才切换，
-            // 纵向/短位移不消费，避免干扰播放器进度条拖动（进度条位于底部控制器，横向拖动会被
-            // 控制器自身捕获，此处手势只在未命中控制器区域时生效）。
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .pointerInput(uri) {
-                        var lastTapTime = 0L
-                        awaitEachGesture {
-                            val down = awaitFirstDown()
-                            var dragX = 0f
-                            var lastPoint = down.position
-                            var moved = false
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val pressed = event.changes.filter { it.pressed }
-                                if (pressed.isEmpty()) {
-                                    // 抬手
-                                    if (!moved) {
-                                        val tapTime = SystemClock.uptimeMillis()
-                                        if (lastTapTime != 0L && tapTime - lastTapTime <= 300L) {
-                                            lastTapTime = 0L
-                                            onDoubleTap()
-                                        } else {
-                                            lastTapTime = tapTime
-                                        }
-                                    } else if (abs(dragX) >= 120f) {
-                                        // 横向滑动切换媒体（左滑下一张，右滑上一张）
-                                        if (dragX <= -120f) onSwipeNext() else onSwipePrev()
-                                    }
-                                    break
-                                }
-                                if (pressed.size == 1) {
-                                    val p = pressed[0]
-                                    val delta = p.position - lastPoint
-                                    dragX += delta.x
-                                    if (delta.x != 0f || delta.y != 0f) moved = true
-                                    lastPoint = p.position
-                                    if (moved) p.consume()
-                                } else {
-                                    // 多指：不处理，交由系统/播放器，避免误判
-                                    lastPoint = pressed.last().position
-                                }
-                            }
-                        }
-                    },
-            )
-            if (error) {
-                Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("无法播放该视频", color = Color.White)
-                        TextButton(onClick = { error = false; tryKey++ }) {
-                            Text("重试", color = SlidesAccent)
-                        }
+        // 手势层：用原生 OnTouchListener 自行判定「单击 / 双击 / 横向滑动」，避免 Compose
+        // pointerInput 在 AndroidView 之上抢占 down 事件导致 PlayerView 收不到单击。
+        // 语义：
+        //   - 单击（300ms 内无第二次 tap）→ 切换进度条显隐（手动控制控制器）；
+        //   - 双击 → 收藏，且不唤起进度条（第一次 tap 不立即 show，等 300ms 判定窗结束）；
+        //   - 横向滑动 ≥ 阈值 → 切换媒体。
+        // 回调用 rememberUpdatedState 持有最新引用，并在 update 块写回手势监听器，
+        // 避免 AndroidView factory 只创建一次导致的陈旧闭包（问题3：多次双击按钮不同步）。
+        val currentDoubleTap by rememberUpdatedState(onDoubleTap)
+        val currentNext by rememberUpdatedState(onSwipeNext)
+        val currentPrev by rememberUpdatedState(onSwipePrev)
+        // 持有手势监听器引用：factory 创建 PlayerView 时建立，update 每次写回最新回调。
+        var gestureRef by remember { mutableStateOf<VideoTouchGesture?>(null) }
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = true
+                    controllerAutoShow = false // 显隐完全由手势层接管，避免双击时自动唤起
+                    controllerShowTimeoutMs = 4000
+                    val g = VideoTouchGesture(this)
+                    gestureRef = g
+                    setOnTouchListener(g)
+                }
+            },
+            update = { view ->
+                view.player = player
+                // 每次 recompose 同步最新回调，消除陈旧闭包
+                gestureRef?.let { g ->
+                    g.onDoubleTap = currentDoubleTap
+                    g.onSwipeNext = currentNext
+                    g.onSwipePrev = currentPrev
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (error) {
+            Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("无法播放该视频", color = Color.White)
+                    TextButton(onClick = { error = false; tryKey++ }) {
+                        Text("重试", color = SlidesAccent)
                     }
                 }
             }
         }
+    }
+}
+
+/** 视频手势：native OnTouchListener——单击切换进度条显隐、双击收藏（不唤起进度条）、横向滑动切集。 */
+private class VideoTouchGesture(
+    private val playerView: PlayerView,
+) : android.view.View.OnTouchListener {
+    // 回调为可变字段：由 VideoPlayerView 的 AndroidView.update 每次 recompose 写入最新值，
+    // 避免 factory 只创建一次导致的陈旧闭包（多次双击收藏按钮不同步）。
+    var onDoubleTap: () -> Unit = {}
+    var onSwipeNext: () -> Unit = {}
+    var onSwipePrev: () -> Unit = {}
+
+    private var lastTapTime = 0L
+    private var downX = 0f
+    private var dragX = 0f
+    private var moved = false
+    // 自维护控制器显隐状态（Media3 无公开 isControllerVisible）
+    private var controllerVisible = false
+    // 单击判定的延迟任务：300ms 内若出现第二次 tap 则取消（判定为双击），否则执行单击动作。
+    private var pendingSingleTap: Runnable? = null
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    override fun onTouch(v: android.view.View, event: android.view.MotionEvent): Boolean {
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                dragX = 0f
+                moved = false
+                return true
+            }
+            android.view.MotionEvent.ACTION_MOVE -> {
+                dragX = event.x - downX
+                if (kotlin.math.abs(dragX) > 24f) moved = true
+                return true
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                if (kotlin.math.abs(dragX) >= 120f) {
+                    // 横向滑动达到阈值：切换媒体（先取消可能存在的单击任务）
+                    pendingSingleTap?.let { handler.removeCallbacks(it) }
+                    pendingSingleTap = null
+                    if (dragX <= -120f) onSwipeNext() else onSwipePrev()
+                    return true
+                }
+                if (moved) return true // 轻微移动：忽略
+                // 无位移的轻点：进入单击/双击判定窗
+                val now = SystemClock.uptimeMillis()
+                val isDouble = lastTapTime != 0L && now - lastTapTime <= 300L
+                if (isDouble) {
+                    // 双击：取消未执行的单击任务，收藏，且不唤起进度条
+                    lastTapTime = 0L
+                    pendingSingleTap?.let { handler.removeCallbacks(it) }
+                    pendingSingleTap = null
+                    onDoubleTap()
+                } else {
+                    // 第一次 tap：不立即动作，延迟 300ms 判定是否单击
+                    lastTapTime = now
+                    pendingSingleTap?.let { handler.removeCallbacks(it) }
+                    val task = Runnable {
+                        pendingSingleTap = null
+                        // 单击：切换进度条显隐
+                        if (controllerVisible) { playerView.hideController(); controllerVisible = false }
+                        else { playerView.showController(); controllerVisible = true }
+                    }
+                    pendingSingleTap = task
+                    handler.postDelayed(task, 300L)
+                }
+                return true
+            }
+        }
+        return false
     }
 }

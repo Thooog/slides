@@ -32,18 +32,24 @@ data class MediaItem(
     val localId: String get() = "${collection.name}:$id"
 
     /**
-     * 跨重建/重扫的稳定匹配键（Spec MEDIA_IDENTITY_FAVORITES §1）。
-     * 不依赖列表下标或可能被系统重用的裸 systemId；组合卷+集合+ID+相对路径+名称+修改时间，
-     * 使同卷移动/重命名不因路径变化丢收藏，库重建后能按相同特征重新匹配。
-     * 注意：这仍是启发式 locator，不是绝对不可冲突的唯一 ID；冲突时保留旧记录不猜测关联。
+     * App 稳定媒体 ID（Spec DATA_RECOVERY_CONTRACT §1 / MEDIA_IDENTITY_FAVORITES §1）：
+     * 卷 + 集合 + 系统ID。这三者是 MediaStore 中真正跨重扫稳定的身份锚点；
+     * dateAddedSec / 路径 / 名称 / 修改时间均为可变 locator，移动/改名会改变它们，
+     * 故不得纳入身份，否则「普通同卷移动/重命名」会丢收藏（违反 Spec §1）。
      */
-    val stableKey: String
+    val appId: String
         get() {
             val v = volumeName.ifBlank { "unknown" }
-            val r = relativePath.trim('/').ifBlank { "ROOT" }
-            val m = dateModifiedSec.toString()
-            return "media|$v|${collection.name}|$id|$r|$name|$m"
+            return "media|$v|${collection.name}|$id"
         }
+
+    /**
+     * 跨重建/重扫的稳定匹配键（Spec MEDIA_IDENTITY_FAVORITES §1）。
+     * 保留为兼容别名：与 [appId] 等价（T007 起收藏主键由 stableKey 迁移为 appId）。
+     * 注意：历史拼接 key（含路径/名称/修改时间）已废弃，迁移时按 appId 重绑定。
+     */
+    val stableKey: String
+        get() = appId
 
     /** 目录稳定身份（卷+相对路径）。同名不同卷/路径产生不同 key，不会合并。 */
     val directoryKey: String

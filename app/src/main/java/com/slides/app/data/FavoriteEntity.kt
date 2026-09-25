@@ -1,5 +1,6 @@
 package com.slides.app.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -9,10 +10,20 @@ import androidx.room.PrimaryKey
  * 只存稳定匹配键 + 收藏时间，不存媒体元数据；与可重建的媒体索引完全分离。
  * - stableKey：跨重建/重扫的稳定 locator（见 MediaItem.stableKey）。
  * - favoritedAtMs：收藏提交时间；重复设 true 不刷新，取消后重收藏记录新时间。
- * 收藏存在不授予访问权；可见集合 = 当前可访问媒体 ∩ favorite。
+ * - matchState（T008）：matched = 收藏与当前身份正常关联；unmatched = 系统ID复用/库重建
+ *   无法确认同一对象，收藏被摘除但记录与时间保留（键加 orphan| 前缀），可恢复、不静默丢失。
+ * 收藏存在不授予访问权；可见集合 = 当前可访问媒体 ∩ favorite(matched)。
  */
 @Entity(tableName = "favorites", indices = [Index(value = ["favoritedAtMs"])])
 data class FavoriteEntity(
     @PrimaryKey val stableKey: String,
     val favoritedAtMs: Long,
+    @ColumnInfo(defaultValue = "matched")
+    val matchState: String = MatchState.MATCHED,
 )
+
+/** 收藏匹配状态。 */
+object MatchState {
+    const val MATCHED = "matched"
+    const val UNMATCHED = "unmatched"
+}

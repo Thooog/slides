@@ -7,15 +7,23 @@ import kotlinx.coroutines.flow.map
 /**
  * 收藏仓库：封装收藏状态查询与提交。
  * - 收藏状态 = 当前可访问媒体 ∩ favorite（访问与收藏正交，Spec §2）。
- * - 提交失败抛异常，由上层回滚，不显示虚假成功（Spec §3）。
+ * - 提交用事务化 toggle（find+insert/delete 原子），失败抛异常由上层反馈，不显示虚假成功。
  * - 取消后重收藏记录新时间；重复设 true 不刷新（Spec §3）。
  */
-class FavoriteRepository(context: Context) {
+class FavoriteRepository private constructor(
+    private val dao: FavoriteDao,
+) {
 
-    private val dao = AppDatabase.get(context).favoriteDao()
+    constructor(context: Context) : this(AppDatabase.get(context).favoriteDao())
+
+    /** 测试用：注入 DAO。 */
+    constructor(db: AppDatabase) : this(db.favoriteDao())
 
     /** 全量收藏（跨目录聚合，按收藏时间倒序）。 */
     fun observeFavorites(): Flow<List<FavoriteEntity>> = dao.observeAll()
+
+    /** 一次性读取当前 matched 收藏（重绑定后主动刷新用，不依赖 Flow 异步发射）。 */
+    suspend fun currentFavorites(): List<FavoriteEntity> = dao.allDesc()
 
     /** 当前收藏键集合。 */
     fun observeFavoriteKeys(): Flow<Set<String>> =
@@ -33,15 +41,10 @@ class FavoriteRepository(context: Context) {
         dao.delete(stableKey)
     }
 
-    /** 切换收藏：返回切换后是否已收藏。失败抛异常由上层处理。 */
-    suspend fun toggle(stableKey: String, nowMs: Long): Boolean {
-        val existing = dao.find(stableKey)
-        return if (existing == null) {
-            dao.upsert(FavoriteEntity(stableKey, nowMs))
-            true
-        } else {
-            dao.delete(stableKey)
-            false
-        }
-    }
+    /**
+     * 切换收藏（事务化）：返回切换后是否已收藏。
+     * 失败抛异常，不静默吞掉，由上层做失败反馈与状态回滚。
+     */
+    suspend fun toggle(stableKey: String, nowMs: Long): Boolean =
+        dao.toggleAtomic(stableKey, nowMs)
 }
